@@ -1,0 +1,109 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [user-service, reward-service, transaction-service, batch-analytics]
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      if: matrix.service == 'user-service'
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Set up Java
+      if: matrix.service == 'reward-service'
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Set up Python
+      if: matrix.service == 'transaction-service' || matrix.service == 'batch-analytics'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Run Go Tests
+      if: matrix.service == 'user-service'
+      run: |
+        cd user-service
+        go test ./...
+
+    - name: Run Java Tests
+      if: matrix.service == 'reward-service'
+      run: |
+        cd reward-service
+        ./mvnw test
+
+    - name: Run Python Tests
+      if: matrix.service == 'transaction-service' || matrix.service == 'batch-analytics'
+      run: |
+        cd ${{ matrix.service }}
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pytest
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build and push Docker images
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        for service in user-service reward-service transaction-service; do
+          docker build -t $ECR_REGISTRY/$service:${{ github.sha }} ./$service
+          docker push $ECR_REGISTRY/$service:${{ github.sha }}
+        done
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Deploy Infrastructure
+      run: |
+        cd infra
+        terraform init
+        terraform apply -auto-approve
+
+    - name: Deploy Services
+      run: |
+        for service in user-service reward-service transaction-service; do
+          aws ecs update-service --cluster loyalty-platform --service $service --force-new-deployment
+        done 

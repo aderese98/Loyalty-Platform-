@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # User Service
   user-service:
     build:
       context: ./user-service
@@ -12,10 +13,14 @@ services:
       - DB_PORT=5432
       - DB_USER=postgres
       - DB_PASSWORD=postgres
-      - DB_NAME=user_service
+      - DB_NAME=loyalty_users
+      - SERVICE_PORT=8080
     depends_on:
       - postgres
+    networks:
+      - loyalty-network
 
+  # Reward Service
   reward-service:
     build:
       context: ./reward-service
@@ -23,27 +28,44 @@ services:
     ports:
       - "8081:8081"
     environment:
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/reward_service
+      - SPRING_PROFILES_ACTIVE=local
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/loyalty_rewards
       - SPRING_DATASOURCE_USERNAME=postgres
       - SPRING_DATASOURCE_PASSWORD=postgres
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - AWS_REGION=us-east-1
+      - AWS_SQS_QUEUE_URL=http://localstack:4566/000000000000/reward-service-queue
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
     depends_on:
       - postgres
+      - dynamodb-local
+      - localstack
+    networks:
+      - loyalty-network
 
+  # Transaction Service
   transaction-service:
     build:
       context: ./transaction-service
       dockerfile: Dockerfile
     ports:
-      - "8082:8082"
+      - "8082:8000"
     environment:
-      - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_USER=postgres
-      - DB_PASSWORD=postgres
-      - DB_NAME=transaction_service
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - AWS_REGION=us-east-1
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - SNS_ENDPOINT=http://localstack:4566
+      - DYNAMODB_TABLE=transactions
+      - SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:reward-events
     depends_on:
-      - postgres
+      - dynamodb-local
+      - localstack
+    networks:
+      - loyalty-network
 
+  # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
     ports:
@@ -51,16 +73,67 @@ services:
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
+      - POSTGRES_MULTIPLE_DATABASES=loyalty_users,loyalty_rewards
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    networks:
+      - loyalty-network
 
-  redis:
-    image: redis:7-alpine
+  # DynamoDB Local
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
     ports:
-      - "6379:6379"
+      - "8000:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data/"
     volumes:
-      - redis_data:/data
+      - dynamodb-data:/home/dynamodblocal/data
+    networks:
+      - loyalty-network
+
+  # LocalStack for AWS Services
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns,sqs
+      - DEFAULT_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - DEBUG=1
+    volumes:
+      - localstack-data:/var/lib/localstack
+    networks:
+      - loyalty-network
+
+  # Initialization Service
+  init-aws:
+    image: amazon/aws-cli:latest
+    depends_on:
+      - localstack
+    environment:
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - AWS_DEFAULT_REGION=us-east-1
+      - ENDPOINT_URL=http://localstack:4566
+    command: >
+      /bin/sh -c "
+        echo 'Waiting for LocalStack...' &&
+        sleep 10 &&
+        aws --endpoint-url=http://localstack:4566 sqs create-queue --queue-name reward-service-queue &&
+        aws --endpoint-url=http://localstack:4566 sns create-topic --name reward-events &&
+        aws --endpoint-url=http://localstack:4566 sns subscribe --topic-arn arn:aws:sns:us-east-1:000000000000:reward-events --protocol sqs --notification-endpoint http://localstack:4566/000000000000/reward-service-queue
+      "
+    networks:
+      - loyalty-network
 
 volumes:
-  postgres_data:
-  redis_data: 
+  postgres-data:
+  dynamodb-data:
+  localstack-data:
+
+networks:
+  loyalty-network:
+    driver: bridge 

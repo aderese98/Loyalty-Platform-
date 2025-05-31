@@ -1,0 +1,3 @@
+com/loyalty/reward/model/Transaction.class
+com/loyalty/reward/service/RewardService.class
+com/loyalty/reward/consumer/TransactionConsumer.class

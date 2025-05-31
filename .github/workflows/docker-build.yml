@@ -1,0 +1,56 @@
+name: Docker Build and Push
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push User Service
+        uses: docker/build-push-action@v4
+        with:
+          context: ./user-service
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/user-service:latest
+
+      - name: Build and push Reward Service
+        uses: docker/build-push-action@v4
+        with:
+          context: ./reward-service
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/reward-service:latest
+
+      - name: Build and push Transaction Service
+        uses: docker/build-push-action@v4
+        with:
+          context: ./transaction-service
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/transaction-service:latest
+
+      - name: Build and push Analytics Service
+        uses: docker/build-push-action@v4
+        with:
+          context: ./analytics-service
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/analytics-service:latest 

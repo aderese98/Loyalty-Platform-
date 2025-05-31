@@ -1,0 +1,200 @@
+version: '3.8'
+
+services:
+  # User Service
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=loyalty
+      - DB_PASSWORD=loyalty123
+      - DB_NAME=loyalty
+      - SERVICE_PORT=8080
+      - LOG_LEVEL=info
+      - METRICS_PORT=9090
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - loyalty-network
+
+  # Reward Service
+  reward-service:
+    build:
+      context: ./reward-service
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=local
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/loyalty
+      - SPRING_DATASOURCE_USERNAME=loyalty
+      - SPRING_DATASOURCE_PASSWORD=loyalty123
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - AWS_REGION=us-east-1
+      - AWS_SQS_QUEUE_URL=http://localstack:4566/000000000000/reward-service-queue
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - LOG_LEVEL=INFO
+      - METRICS_PORT=9091
+    depends_on:
+      - postgres
+      - dynamodb-local
+      - localstack
+    networks:
+      - loyalty-network
+
+  # Transaction Service
+  transaction-service:
+    build:
+      context: ./transaction-service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8000"
+    environment:
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - AWS_REGION=us-east-1
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - SNS_ENDPOINT=http://localstack:4566
+      - DYNAMODB_TABLE=transactions
+      - SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:reward-events
+      - LOG_LEVEL=INFO
+      - METRICS_PORT=9092
+    depends_on:
+      - dynamodb-local
+      - localstack
+    networks:
+      - loyalty-network
+
+  # Recommendation Service
+  recommendation-service:
+    build:
+      context: ./recommendation-service
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      - LOG_LEVEL=INFO
+      - METRICS_PORT=9093
+    networks:
+      - loyalty-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - loyalty-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    networks:
+      - loyalty-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: loyalty
+      POSTGRES_PASSWORD: loyalty123
+      POSTGRES_DB: loyalty
+    ports:
+      - "5433:5432"
+    volumes:
+      - type: volume
+        source: postgres_data
+        target: /var/lib/postgresql/data
+    networks:
+      - loyalty-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loyalty"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # DynamoDB Local
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8000:8000"
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data/"
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    networks:
+      - loyalty-network
+
+  # LocalStack for AWS Services
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns,sqs
+      - DEFAULT_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - DEBUG=1
+    volumes:
+      - localstack-data:/var/lib/localstack
+    networks:
+      - loyalty-network
+
+  # Initialization Service
+  init-aws:
+    image: amazon/aws-cli:latest
+    depends_on:
+      - localstack
+    environment:
+      - AWS_ACCESS_KEY_ID=local
+      - AWS_SECRET_ACCESS_KEY=local
+      - AWS_DEFAULT_REGION=us-east-1
+      - ENDPOINT_URL=http://localstack:4566
+    command: >
+      /bin/sh -c "
+        echo 'Waiting for LocalStack...' &&
+        sleep 10 &&
+        aws --endpoint-url=http://localstack:4566 sqs create-queue --queue-name reward-service-queue &&
+        aws --endpoint-url=http://localstack:4566 sns create-topic --name reward-events &&
+        aws --endpoint-url=http://localstack:4566 sns subscribe --topic-arn arn:aws:sns:us-east-1:000000000000:reward-events --protocol sqs --notification-endpoint http://localstack:4566/000000000000/reward-service-queue
+      "
+    networks:
+      - loyalty-network
+
+volumes:
+  postgres_data:
+  dynamodb-data:
+  localstack-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  loyalty-network:
+    driver: bridge 
